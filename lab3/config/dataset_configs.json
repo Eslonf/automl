@@ -1,0 +1,14 @@
+{
+  "bank_churn": {
+    "kaggle_dataset": "barelydedicated/bank-customer-churn-modeling",
+    "target_column": "Exited",
+    "problem_type": "binary_classification",
+    "evaluation_metric": "f1"
+  },
+  "wine_quality": {
+    "kaggle_dataset": "yasserh/wine-quality-dataset",
+    "target_column": "quality",
+    "problem_type": "regression",
+    "evaluation_metric": "rmse"
+  }
+}

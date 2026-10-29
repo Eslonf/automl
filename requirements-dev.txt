@@ -1,0 +1,21 @@
+# Анализ данных и ML
+pandas
+numpy
+scikit-learn
+xgboost
+lightgbm
+matplotlib
+seaborn
+
+# MLOps и трекинг
+mlflow
+kaggle
+
+# API и инференс (Lab 4)
+fastapi
+uvicorn
+pydantic
+prometheus-client
+
+# Мониторинг дрейфа (Lab 4)
+evidently

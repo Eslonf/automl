@@ -1,0 +1,30 @@
+# Временные папки
+deploy/content/logs/
+deploy/content/plugins/
+deploy/content/config/
+deploy/content/dags/
+deploy/content/scripts/
+
+# Секреты (токены Kaggle)
+.kaggle.env
+kaggle.json
+
+# Данные и кэш Python
+*.csv
+*.parquet
+/tmp/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+
+# Системные файлы
+.DS_Store
+
+# Базы данных и метрики Docker volumes
+postgres-data/
+mlflow-data/
+prometheus-data/
+grafana-data/
+*.db
+*.sqlite

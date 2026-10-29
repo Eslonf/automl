@@ -1,0 +1,317 @@
+networks:
+  public-network:
+    driver: bridge
+    internal: false
+    name: "public-network"
+  internal-network:
+    internal: true
+    name: "internal-network"
+
+x-airflow-common: &airflow-common
+  build:
+    context: ./docker/airflow
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: ${AIRFLOW_CORE_EXECUTOR}
+    AIRFLOW__CORE__AUTH_MANAGER: ${AIRFLOW_CORE_AUTH_MANAGER}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${DB_USER}:${DB_PASSWORD}@${DB_CONTAINER}/${DB_NAME}
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://${AIRFLOW_API_CONTAINER}:8080/execution/'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-airflow_jwt_secret}
+    AIRFLOW__METRICS__STATSD_ON: 'True'
+    AIRFLOW__METRICS__STATSD_HOST: ${STATSD_CONTAINER}
+    AIRFLOW__METRICS__STATSD_PORT: '9125'
+    AIRFLOW__METRICS__STATSD_PREFIX: 'airflow'
+    MLFLOW_TRACKING_URI: 'http://${MLFLOW_CONTAINER}:5000'
+    AIRFLOW__CORE__DAGS_FOLDER: '/opt/airflow/dags'
+    PYTHONPATH: '/opt/airflow/project'
+  env_file:
+    - .kaggle.env
+  volumes:
+    - ../:/opt/airflow/project:z
+    - ../lab1/dags:/opt/airflow/dags/lab1:z
+    - ../lab2/dags:/opt/airflow/dags/lab2:z
+    - ../lab3/dags:/opt/airflow/dags/lab3:z
+    - ../lab4/dags:/opt/airflow/dags/lab4:z
+    - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs:z
+    - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins:z
+    - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config:z
+    - mlflow-data:/mlflow
+    - project-data:/opt/airflow/data:z
+  networks:
+    public-network:
+    internal-network:
+  user: "${AIRFLOW_UID}:0"
+  depends_on:
+    &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+
+services:
+  traefik:
+    image: ${TRAEFIK_IMAGE}
+    container_name: ${TRAEFIK_CONTAINER}
+    security_opt:
+      - label:disable
+    ports:
+      - "80:80"
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+      - type: bind
+        source: ./configs/traefik/main.yml
+        target: /etc/traefik/traefik.yml
+        read_only: true
+    networks:
+      public-network:
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.${TRAEFIK_CONTAINER}.loadbalancer.server.port=8080
+      - traefik.http.routers.${TRAEFIK_CONTAINER}.entrypoints=web_insecure
+      - traefik.http.routers.${TRAEFIK_CONTAINER}.rule=Host(`${TRAEFIK_DOMAIN}`)
+      - traefik.http.routers.${TRAEFIK_CONTAINER}.service=api@internal
+
+  postgres:
+    image: ${DB_IMAGE}
+    container_name: ${DB_CONTAINER}
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      - type: volume
+        source: postgres-data
+        target: /var/lib/postgresql/data
+    networks:
+      internal-network:
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "${DB_USER}" ]
+      interval: 5s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: ${AIRFLOW_INIT_CONTAINER}
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        echo "Создание служебных директорий Airflow..."
+        mkdir -p /opt/airflow/logs /opt/airflow/plugins /opt/airflow/config /opt/airflow/data
+        
+        echo "Инициализация базы данных Airflow..."
+        /entrypoint airflow db migrate
+        
+        echo "Создание пользователя-администратора..."
+        /entrypoint airflow users create --role Admin --username $${_AIRFLOW_WWW_USER_USERNAME} --password $${_AIRFLOW_WWW_USER_PASSWORD} --email admin@localhost --firstname Admin --lastname User || true
+        
+        echo "Настройка прав доступа для системных логов и данных..."
+        chown -R "${AIRFLOW_UID}:0" /opt/airflow/logs /opt/airflow/plugins /opt/airflow/config /opt/airflow/data
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_USERNAME}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_PASSWORD}
+    user: "0:0"
+
+  airflow-apiserver:
+    <<: *airflow-common
+    container_name: ${AIRFLOW_API_CONTAINER}
+    ports:
+      - "8080:8080"
+    command: api-server
+    healthcheck:
+      test: [ "CMD", "curl", "--fail", "http://localhost:8080/api/v2/version" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.${AIRFLOW_API_CONTAINER}.loadbalancer.server.port=8080
+      - traefik.http.routers.${AIRFLOW_API_CONTAINER}.entrypoints=web_insecure
+      - traefik.http.routers.${AIRFLOW_API_CONTAINER}.rule=Host(`${AIRFLOW_DOMAIN}`)
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    restart: always
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: ${AIRFLOW_DAG_PROCESSOR_CONTAINER}
+    command: dag-processor
+    healthcheck:
+      test: [ "CMD", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"' ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: ${AIRFLOW_SCHEDULER_CONTAINER}
+    command: scheduler
+    healthcheck:
+      test: [ "CMD", "curl", "--fail", "http://localhost:8974/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  mlflow:
+    build:
+      context: docker/mlflow
+    container_name: ${MLFLOW_CONTAINER}
+    ports:
+      - "5000:5000"
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    volumes:
+      - type: volume
+        source: mlflow-data
+        target: /mlflow
+    networks:
+      public-network:
+      internal-network:
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.${MLFLOW_CONTAINER}.loadbalancer.server.port=5000
+      - traefik.http.routers.${MLFLOW_CONTAINER}.entrypoints=web_insecure
+      - traefik.http.routers.${MLFLOW_CONTAINER}.rule=Host(`${MLFLOW_DOMAIN}`)
+    restart: always
+
+  statsd-exporter:
+    image: ${STATSD_IMAGE}
+    container_name: ${STATSD_CONTAINER}
+    entrypoint: statsd_exporter
+    command:
+      - "--statsd.listen-udp=:9125"
+      - "--log.level=debug"
+      - "--statsd.mapping-config=/etc/statsd-exporter/mapping.yml"
+    ports:
+      - "9125:9125"
+    expose:
+      - "9125/udp"
+    volumes:
+      - type: bind
+        source: ./configs/statsd/main.yml
+        target: /etc/statsd-exporter/mapping.yml
+        read_only: true
+    networks:
+      public-network:
+      internal-network:
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.${STATSD_CONTAINER}.loadbalancer.server.port=9102
+      - traefik.http.routers.${STATSD_CONTAINER}.entrypoints=web_insecure
+      - traefik.http.routers.${STATSD_CONTAINER}.rule=Host(`${STATSD_DOMAIN}`)
+    restart: always
+
+  prometheus:
+    image: ${PROMETHEUS_IMAGE}
+    container_name: ${PROMETHEUS_CONTAINER}
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    volumes:
+      - type: volume
+        source: prometheus-data
+        target: /prometheus
+      - type: bind
+        source: ./configs/prometheus/main.yml
+        target: /etc/prometheus/prometheus.yml
+        read_only: true
+    networks:
+      public-network:
+      internal-network:
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.${PROMETHEUS_CONTAINER}.loadbalancer.server.port=9090
+      - traefik.http.routers.${PROMETHEUS_CONTAINER}.entrypoints=web_insecure
+      - traefik.http.routers.${PROMETHEUS_CONTAINER}.rule=Host(`${PROMETHEUS_DOMAIN}`)
+    restart: always
+
+  grafana:
+    image: ${GRAFANA_IMAGE}
+    container_name: ${GRAFANA_CONTAINER}
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+    volumes:
+      - type: volume
+        source: grafana-data
+        target: /var/lib/grafana
+      - type: bind
+        source: ./configs/grafana/etc/grafana/provisioning/datasources/
+        target: /etc/grafana/provisioning/datasources/
+        read_only: true
+      - type: bind
+        source: ./configs/grafana/etc/grafana/provisioning/dashboards/
+        target: /etc/grafana/provisioning/dashboards/
+        read_only: true
+      - type: bind
+        source: ./configs/grafana/var/lib/grafana/dashboards/
+        target: /var/lib/grafana/dashboards/
+        read_only: true
+    networks:
+      public-network:
+      internal-network:
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.${GRAFANA_CONTAINER}.loadbalancer.server.port=3000
+      - traefik.http.routers.${GRAFANA_CONTAINER}.entrypoints=web_insecure
+      - traefik.http.routers.${GRAFANA_CONTAINER}.rule=Host(`${GRAFANA_DOMAIN}`)
+    depends_on:
+      - prometheus
+    restart: always
+
+  fastapi:
+    build: 
+      context: ./docker/airflow
+    container_name: fastapi
+    command: python /opt/airflow/project/lab4/api/main.py
+    environment:
+      MLFLOW_TRACKING_URI: http://${MLFLOW_CONTAINER}:5000
+      PYTHONPATH: /opt/airflow/project
+    volumes:
+      - ../:/opt/airflow/project:z
+      - mlflow-data:/mlflow
+      - project-data:/opt/airflow/data:z
+    networks:
+      public-network:
+      internal-network:
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mlflow
+    restart: always
+
+volumes:
+  postgres-data:
+  mlflow-data:
+  prometheus-data:
+  grafana-data:
+  project-data:

@@ -1,0 +1,32 @@
+# Core Data Processing
+pandas~=2.3.0
+numpy~=1.26.0
+pyarrow~=18.1.0
+
+# Data Sources & APIs
+kaggle~=2.2.0
+python-dotenv~=1.2.0
+requests~=2.32.0
+
+# Machine Learning & Tracking
+mlflow~=3.17.0
+scikit-learn~=1.8.0
+xgboost~=3.4.0
+lightgbm~=4.7.0
+
+# Database Connectivity
+psycopg2-binary~=2.9.0
+
+# Visualization
+matplotlib~=3.11.0
+seaborn~=0.13.0
+
+# API & Inference (Lab 4)
+fastapi~=0.117.0
+uvicorn~=0.40.0
+pydantic~=2.12.0
+
+# Monitoring & Drift Detection (Lab 4)
+prometheus-client~=0.24.0
+evidently~=0.7.0
+alibi-detect~=0.13.0
